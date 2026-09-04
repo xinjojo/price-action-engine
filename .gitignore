@@ -1,0 +1,36 @@
+# ---- 密钥 / 本地配置（脱敏关键，勿删）----
+.env
+.env.*
+!.env.example
+*.token
+configs/local_*.yaml
+configs/local_*.yml
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 数据 / 缓存（绝不入库）----
+data/
+cache/
+*.parquet
+*.feather
+*.pkl
+*.h5
+
+# ---- 研究产物 ----
+notebooks/
+.ipynb_checkpoints/
+outputs/
+runs/
+
+# ---- OS / 编辑器 ----
+.DS_Store
+.idea/
+.vscode/
