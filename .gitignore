@@ -34,3 +34,6 @@ runs/
 .DS_Store
 .idea/
 .vscode/
+
+# ---- workbuddy 内部 memory（不入版本库，本地保留）----
+.workbuddy/
