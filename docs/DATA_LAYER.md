@@ -1,7 +1,7 @@
-# DATA_LAYER.md — 数据层设计 V0.1
+# DATA_LAYER.md — 数据层设计 V0.1.1
 
-> 状态：**草案，待审核**。
-> 本文件所有第三方接口名、字段名均为 2026-09-04 查证结果。接入前需复验。
+> 状态：**V0.1.1 收尾。TushareProvider 最小骨架已实现并通过测试。**
+> 第三方接口与字段名均为 2026-09-04 查证 + 实际探针结果。
 
 ---
 
@@ -82,17 +82,20 @@ ST 戴帽/摘帽、停牌/复牌都是有起止日的事件。返回单点会在
 
 ### 2.2 必须注意的坑
 
-**① `stk_limit` 用 `-1` 表示"当日无涨跌幅限制"。**
-实测证据：2020-08-24 创业板注册制首日，`N康泰` 等新股的 `up_limit` / `down_limit` 均为 `-1.00`，而当日涨幅达 1061%。
+**① `stk_limit` 用极端涨跌停价表示"无涨跌幅限制"。**
 
-这是一个**哨兵值**，不是价格。代码里必须：
+⚠️ **V0.1 文档曾写作 `-1`，那是第三方数据表的表示，不是 Tushare 契约**。
+本轮已通过真实探针确认（见 §2.5 实测）。
 
 ```python
-if up_limit == -1 or down_limit == -1:
-    has_price_limit = False   # 绝不是 "涨停价是 -1 元"
+# 2026-09-04 实测哨兵值
+if up_limit >= 999999 and down_limit <= 0.01:
+    mode = UNLIMITED
+# 绝不能把 0.01 当成"跌停价是 1 分"
 ```
 
 忽略这一点会让所有新股前 5 日、退市整理期首日被判成"跌停"，产生大量假信号。
+**哨兵识别仅在 `TushareProvider` 内进行**，Core 看不到任何 999999 / 0.01。
 
 **② `adj_factor` 不能跨源混用。**
 Tushare 官方说明原文：*"由于复权因子在计算的过程中各个数据源对现金分红、送股、配股、税务等不同事件采用了不同的处理逻辑，故而不同数据源的复权因子也会有差异。"*
@@ -105,14 +108,50 @@ Tushare 官方说明原文：*"由于复权因子在计算的过程中各个数�
 **④ 数据更新时点。**
 `stk_limit` 每交易日 08:40 左右更新当日涨跌停价。这意味着盘中/盘前取当日数据是合理的，但回测中取"当日"要小心：回测只用历史日期，不受影响。
 
-### 2.3 尚待实测确认的点（不要假设）
+### 2.3 V0.1.1 已实测（不再"待探明"）
 
-- `stk_limit` 的历史起始年份（不同板块可能不同）
-- `namechange` 的 `change_reason` 枚举值全集，以及 ST 相关取值是否稳定
-- `suspend_d` 对"盘中临时停牌"与"全天停牌"的区分（`suspend_timing` 有值 = 日内停牌，但这对日 K 回测意味着当日**有成交**，不应记为停牌日）
-- 付费套餐对各接口的积分上限
+| 待探明项（V0.1） | 实测结论（2026-09-04） |
+|---|---|
+| `stk_limit` 历史起始年份 | 主源覆盖与 `daily` 一致（≥ 2005；新标的自上市起） |
+| `namechange.change_reason` 全集 | 实测枚举 ∈ {`*ST`, `ST`, `从ST变为*ST`, `其他`, `撤消*ST并实行ST`, `撤销ST`, `退市整理期`}。**Tushare 自身存在"撤消*"与"撤销*"两套字不一致，必须都匹配** |
+| `suspend_d.suspend_timing` 语义 | 非空 = 盘中临停（当日有成交，按 HALTED 处理）；空 = 全天停牌（按 SUSPENDED 处理） |
+| `suspend_d.suspend_type` | `S`=停牌 / `R`=复牌，覆盖停牌到复牌的连续日期 |
+| 哨兵值 | `up_limit ≈ 999999.999` 或 `1000000.0`；`down_limit = 0.01`（**不是 -1**） |
 
-> 这四项在 V0.2 接入时用一个 `scripts/probe_tushare.py` 一次性探明并记录进本文件。**不要凭记忆写进代码。**
+### 2.4 哨兵值契约守卫（V0.1.1 新增）
+
+**铁律**：哨兵值必须只在 `TushareProvider.convert_limit_row()` 内集中识别，
+转换成 `PriceLimitMode.UNLIMITED`，**Core 完全不知道哨兵数字的存在**。
+
+**回归测试**：`tests/test_tushare_adapter.py::TestSentinelContractGuard` 包含四项守卫：
+
+1. 当前哨兵值文档（断言 fixtures == 实测值）
+2. 哨兵被识别为 UNLIMITED
+3. 极端正常价不误判（如 up=1000000 配合 down=10000 不应判 UNLIMITED）
+4. **-1 永不静默归类**：任何 -1 必须上抛 ValueError，不归类为 UNLIMITED
+
+未来 Tushare 改变哨兵表示时，这些测试会【立即失败】——失败时人工复测 Tushare
+当前行为，再决定是否更新 fixtures 与 adapter 判定。
+
+### 2.5 哨兵值实证记录（2026-09-04）
+
+**`/tmp/probe_tushare2.py` 实测结果**（fixtures 基于此）：
+
+| 标的 | 日期 | up_limit | down_limit | 期望解释 |
+|---|---|---|---|---|
+| 001248.SZ | 2026-07-06 | 999999.999 | 0.01 | 新股 → UNLIMITED |
+| 300860.SZ | 2020-08-24 | 1000000.0 | 0.01 | 创业板注册制首批新股 → UNLIMITED |
+| 000001.SZ | 2026-08-21 | 12.54 | 10.26 | 主板正常 → LIMITED（10%） |
+| 000001.SZ | 2005-01-04 | NaN | NaN | 历史早期缺失 → UNKNOWN |
+
+**多重交叉验证**：
+
+- 2020-08-24 创业板注册制首批共 18 只新股全部命中哨兵 → 与"首批 18 家"公开事实完全吻合。
+- 2026-07-06 / 2025-08-15 / 2021-12-01 各命中 1 只新股。
+- 与 `daily.pct_chg` 交叉：`300869.SZ` 2020-08-24 实际涨幅 +1061%，必为无限制。
+- 全部扫描日期内 `-1` **零命中**。
+
+实测脚本 `/tmp/probe_tushare*.py` 与原始输出保存在仓库外本地（不属于版本库），仅 fixtures 留下。
 
 ---
 
@@ -263,20 +302,41 @@ class DailyBar:
 
 qfq 不存储，由 `PriceBridge` 在读取时派生。理由见 §3.3 与 §6.1。
 
-### 4.2 `DailyLimit`
+### 4.2 `DailyLimit`（V0.1.1 改用三态 enum）
 
 ```python
+class PriceLimitMode(Enum):
+    LIMITED    = "limited"     # 有涨跌幅限制
+    UNLIMITED  = "unlimited"   # 当日无涨跌幅限制
+    UNKNOWN    = "unknown"     # 规则未知
+
 @dataclass(frozen=True)
 class DailyLimit:
     symbol: str
     trade_date: date
-    has_price_limit: bool            # False = 当日无涨跌幅限制
-    up_limit: Decimal | None         # None = 未知；-1（哨兵）已在此层被转换掉
-    down_limit: Decimal | None
-    rule_id: str                     # 规则追溯，如 "SZ_GEM_20200824_20PCT"
-    source: LimitSource              # PROVIDER | DERIVED | UNKNOWN
-    confidence: float                # 0–100
+    mode: PriceLimitMode                 # 显式三态，取代 V0.1 的 has_price_limit: bool
+    up_limit: Decimal | None             # LIMITED 时必存在；UNLIMITED / UNKNOWN 时必 None
+    down_limit: Decimal | None           # LIMITED 时必存在；UNLIMITED / UNKNOWN 时必 None
+    rule_id: str | None                  # 规则追溯，如 "SZ_GEM_20200824_20PCT"
+    source: LimitSource                  # PROVIDER | DERIVED | UNKNOWN
 ```
+
+**为什么不是 `has_price_limit: bool`**（V0.1.1 裁决）：
+
+`False` 同时表示"确实无限制"和"不知道"会让下游把"缺数据"当作"可以自由涨跌"。
+这是非常安静的一类错误——回测曲线会一直很漂亮，但全是错的。
+
+**`UNKNOWN ≠ UNLIMITED`**：
+- `UNKNOWN`：不知道有什么规则，必须按 DOWN_LOSS 处理（保守）。
+- `UNLIMITED`：确知无规则，可信任。
+
+下游逻辑必须区分 `mode` 字段，不可只看 `up_limit is None`。
+
+**哨兵处理位置**（V0.1.1）：
+Tushare 的 `999999.999 / 0.01` 与 `1000000.0 / 0.01` 等极端哨兵值
+**只在 `TushareProvider.convert_limit_row()` 内识别并转成 `UNLIMITED`**。
+`DailyLimit.__post_init__` 负责保证 LIMITED 时 up_limit > 0 / down_limit > 0，
+-1 类的无效哨兵会在构造时直接抛错（见 `tests/test_tushare_adapter.py::TestSentinelContractGuard`）。
 
 ### 4.3 为什么价格用 `Decimal`
 
@@ -405,7 +465,7 @@ data/cache/
 |---|---|---|
 | **L0 结构** | 类型、必填字段、非空 | `ERROR` — 拒绝入库 |
 | **L1 单 bar 内部一致性** | `high >= max(open, close)`；`low <= min(open, close)`；`high >= low`；`volume >= 0`；`amount >= 0`；`open/close ∈ [low, high]` | `ERROR` — 该 bar 标记不可用，禁止进入 Core |
-| **L2 涨跌停一致性** | `high <= up_limit + tick`；`low >= down_limit - tick`（当 `has_price_limit=True`）；`raw_pre_close` 与上一交易日 `raw_close` 在**非除权日**应一致 | `ERROR` / `WARN` |
+| **L2 涨跌停一致性** | `high <= up_limit + tick`；`low >= down_limit - tick`（当 `mode == LIMITED`）；`raw_pre_close` 与上一交易日 `raw_close` 在**非除权日**应一致 | `ERROR` / `WARN` |
 | **L3 序列** | 日期严格递增；无重复日期；无缺失交易日（对照日历）；停牌日已用 gap bar 补齐 | `WARN` |
 | **L4 复权自洽** | `adj_factor > 0`；`is_ex_dividend_date` 与 factor 跳变一致；qfq 派生日连续性（除权日不应出现跳空） | `WARN` |
 | **L5 跨源** | Tushare vs 校验源抽样比对 | `WARN`（记为 `DataQualityWarning`） |
@@ -414,7 +474,7 @@ data/cache/
 
 | 检查 | 阈值 | 说明 |
 |---|---|---|
-| 极端收益 | `\|pct_chg\| > 30%` 且 `has_price_limit=False` 且 `is_ex_dividend_date=False` | 新股/退市整理首日除外 |
+| 极端收益 | `\|pct_chg\| > 30%` 且 `mode == UNLIMITED` 且 `is_ex_dividend_date=False` | 新股/退市整理首日除外 |
 | 成交量异常 | `volume == 0` | 可能是停牌或僵尸报价 |
 | 流动性异常 | `amount < 阈值` | 可能是即将退市或长期停牌 |
 | 僵尸报价 | `volume == 0 且 close == pre_close` | a-stock-data 明确警告过的模式 |
@@ -457,20 +517,16 @@ quality_score = 100
 
 ---
 
-## 9. V0.1 / V0.2 分工
+## 9. V0.1 → V0.2 进展
 
-| 阶段 | 内容 |
-|---|---|
-| **V0.1（现在）** | 本文档 + `MarketDataProvider` 接口定义。**不写取数代码。** |
-| **V0.2** | 实现 `TushareProvider`；跑 `scripts/probe_tushare.py` 探明 §2.3 的四个未知项并回填本文档；实现 validators + cache + bridge；实现 `Market Rules` 层 |
-
----
-
-## 10. 需您裁决的问题
-
-| # | 问题 | 我的倾向 |
+| 阶段 | 内容 | 状态 |
 |---|---|---|
-| D1 | a-stock-data 从"日 K 备用源"降级为"交叉校验源"，是否接受？ | 接受。它是单文件 MD，摘取代价高；且缺交易日历与历史涨跌停，做不了日 K 主备 |
-| D2 | 是否接受"摘取代价"——把上游函数复制进仓库自维护（Apache-2.0 需署名）？ | 仅在确实需要 ST/停牌/复权因子校验时才做 |
-| D3 | 价格用 `Decimal` 会牺牲一部分计算性能，是否接受？ | 接受。只在价格比较与成交判定路径用 Decimal，指标管线用 float |
-| D4 | 缓存只存 raw + factor（qfq 每次读取时重算），是否接受？ | 接受。这是正确性问题，不是性能问题 |
+| **V0.1** | 文档 + `MarketDataProvider` 接口定义 | ✅ |
+| **V0.1.1** | TushareProvider 最小骨架；PriceBridge；Primitive Features；Limit Event Detection；单元测试 | ✅ 已完成 |
+| | `scripts/probe_tushare2.py` 探明 §2.3 的未知项并写入 fixtures 与文档 | ✅ |
+| | Validators + Cache | ⬜ V0.2 |
+| **V0.2** | 实现 `Market Rules`（按规则表推导 `DailyLimit`）；接入 a-stock-data 交叉校验（仅 ST / 停牌因子） |
+| **V0.3+** | Primitive Features 之后再叠加：**Swing / Leg / Pullback / Trend / Range / Pressure / Breakout**；Setup Plugins；Backtest |
+
+V0.1.1 收尾后，**底层（数据 + A 股制度 + 单 Bar 语义）已通过测试**。
+下一阶段才进入结构与状态变量。

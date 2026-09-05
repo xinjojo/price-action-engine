@@ -1,0 +1,28 @@
+# PA Engine 引擎配置 —— V0.1.1
+#
+# 用 TOML 而非 YAML：Python 3.11+ 标准库自带 tomllib，无需引入 PyYAML 依赖。
+# 所有参数集中在此，禁止在代码里硬编码。
+
+[features]
+# Wilder ATR 周期。标准定义，不跳过 TR=0（见 A_SHARE_MARKET_RULES.md 裁决四）
+atr_period = 14
+# ATR 归一化封顶：距离 = cap_atr × ATR 时记 100 分
+cap_atr = 3.0
+
+[market]
+# A 股最小价格变动单位（元）。以字符串存储以避免 float 精度问题
+tick = "0.01"
+# 涨跌停价比较容差 = tick / 2
+limit_tolerance = "0.005"
+
+[setup]
+# Setup 允许索取的最大 Snapshot 回看根数（交易日）。
+# 框架按此上限截断，防止某个 Setup 随意索取数千根历史。
+max_lookback_bars = 250
+
+[data]
+schema_version = "0.1.1"
+# Tushare 无涨跌幅限制哨兵值（仅在 TushareProvider 内部使用，Core 不感知）
+# 详见 docs/DATA_LAYER.md §2.4
+tushare_no_limit_up = "999999"
+tushare_no_limit_down = "0.01"
