@@ -17,8 +17,9 @@ venv/
 .ruff_cache/
 
 # ---- 数据 / 缓存（绝不入库）----
-data/
-cache/
+# 只匹配仓库根的 data/ / cache/；子目录的 data/ 是代码包，不在此屏蔽。
+/data/
+/cache/
 *.parquet
 *.feather
 *.pkl
