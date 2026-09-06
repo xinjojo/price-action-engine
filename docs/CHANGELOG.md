@@ -4,6 +4,71 @@
 
 ---
 
+## V0.2 — 2026-09-05 Structure Core
+
+### 算法决策
+
+| 候选 | 因果性 | 参数数 | Brooks 语义 | A 股日 K | 复杂度 | 结论 |
+|---|---|---|---|---|---|---|
+| **ATR Reversal (Directional Change)** | ✅ 极致 | 2 | ✅ 反转阈值与 leg 推进挂钩 | ✅ ATR 已含 LIMIT_CENSORED | 中 | **采纳** |
+| N-bar Confirmed Pivot | ⚠️ 固定延迟 | 1 | ⚠️ 机械不分量级 | ⚠️ N 固定难适配 | 低 | 不采纳 |
+| Centered Fractal | ❌ 必须未来 | 1 | ❌ 机械化 | ⚠️ | 最低 | 拒绝 |
+
+### Price Domain 契约
+
+- `StructureEngine.compute_state(bars, as_of_date)` 在单一入口处锁定 anchor = `as_of_date`。
+- 整段窗口的 qfq 比较都在同一坐标系内（§二 决策原则）。
+- `SwingPoint.price` 永久携带 `raw / analysis / domain / anchor_date` 三件套。
+- 禁止每根 bar 各自 anchor。
+
+### 实现
+
+```
+price_action_engine/structure/
+    types.py        # PriceDomain / StructureAnchor / SwingPoint / LegState / PullbackState / StructureState / StructureBar
+    swing.py        # ATRReversalSwingDetector (causal state machine, candidate 跟随 extreme)
+    leg.py          # LegBuilder (signed net_move, tradeable-bars duration)
+    pullback.py     # PullbackBuilder (depth_pct_of_prior_leg 作为核心字段)
+    assemble.py     # StructureEngine.compute_state 入口
+    __init__.py
+```
+
+### 测试
+
+- 旧 89 / 89 V0.1.1 全部回归通过
+- 新增 37 个 V0.2 测试：
+
+| 测试文件 | 用例数 | 覆盖 |
+|---|---|---|
+| `test_swing.py` | 11 | Detector 阈值 / 一字板 / 停牌 / Outside Bar / event-confirm 分离 |
+| `test_leg.py` | 6 | direction / duration / atr_distance / 不存 leg_strength |
+| `test_pullback.py` | 6 | depth_pct_of_prior_leg / 方向反向 / 停牌不计 |
+| `test_structure_causality.py` | 3 | immutability under future extension / prefix equivalence / ATR(T)-only |
+| `test_structure_corporate_actions.py` | 3 | qfq 连续不产生 Bear Leg / 反向成立 |
+| `test_manual_structure_cases.py` | 8 | Case A-H 八个手工 case 打印 |
+
+合计 **126/126 passed**。
+
+### 设计约束守住
+
+- **§六 Swing event/confirmed 必分离** — SwingPoint 同时保存 `event_date/event_index` 与 `confirmed_date/confirmed_index`，candidate 跟随 extreme 更新。
+- **§九 ATR 仅用 T close 已知** — `swing.step(bar)` 只读 `bar.atr_qfq`，从不访问 bars[i+1]。test_no_future_look_in_swing_decision 验证当 ATR(T) 调整时 T 时刻 confirm 决策确实敏感。
+- **§十 一字板不影响结构** — close=high=low 时仍正常更新 extreme。
+- **§十九 Outside Bar 歧义** — close 已触发反转同时 high 也推进 extreme 时标记 `STRUCTURE_INTRABAR_AMBIGUOUS`，不假装识别顺序。
+- **§二十 停牌日跳过** — Swing/Leg duration 只数 tradeable bars。
+- **§十四 不输出 leg_strength** — `LegState` 不含 `score/leg_strength` 字段，Dataclass fields 守卫。
+
+### 未实现（按 V0.2 指令第二十一节推迟）
+
+- TrendModel
+- TradingRange / RangeScore
+- Bull/Bear Pressure / Breakout Strength / Follow Through
+- Brooks H1/H2/L1/L2 / ICT / Setup
+- ExecutionEngine / Portfolio / Backtest
+- 行情拉取 (TushareProvider.get_daily_price 仍 NotImplementedError)
+
+---
+
 ## V0.1.1 — 2026-09-04 收尾
 
 ### 修正
